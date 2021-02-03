@@ -33,4 +33,6 @@ main' inp =
                   }
                 )
               )
+            ++ "\n\nSolution:\n"
+            ++ show b
             ++ "\n"
