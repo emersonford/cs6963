@@ -11,7 +11,7 @@ module Santorini (GameState
   , toC
   , buildC
   , validTokens
-  , tokensUnique
+  , tokenssUnique
   , occupied
   , canBuild
   , canMove) where
@@ -37,11 +37,11 @@ inTokens c (x, x') = c == x || c == x'
 occupied :: Coord -> (Tokens, Tokens) -> Bool
 occupied c (tokens1, tokens2) = inTokens c tokens1 || inTokens c tokens2
 
-tokensEq :: Tokens -> Tokens -> Bool
-tokensEq (x, x') (y, y') = (x == y && x' == y') || (x == y' && x' == y)
+tokenssPartialEq :: Tokens -> Tokens -> Bool
+tokenssPartialEq (x, x') (y, y') = (x == y && x' == y') || (x == y' && x' == y)
 
-tokensUnique :: Tokens -> Tokens -> Bool
-tokensUnique (x, y) (x', y') = x /= x' && x /= y' && y /= x' && y /= y'
+tokenssUnique :: Tokens -> Tokens -> Bool
+tokenssUnique (x, y) (x', y') = x /= x' && x /= y' && y /= x' && y /= y'
 
 validTokens :: Tokens -> Bool
 validTokens (c1, c2) =
@@ -101,7 +101,7 @@ validateGameState (GameState t sp (Player c1 tkns1, Player c2 tkns2)) =
   validTokens tkns1
     && validTokens tkns2
     -- Ensure each token coordinate is unique.
-    && tokensUnique tkns1 tkns2
+    && tokenssUnique tkns1 tkns2
     -- Ensure each player has a unique card.
     && (c1 /= c2)
     -- Ensure there are 5 rows of spaces.
@@ -128,7 +128,7 @@ genCoords filterF = [ (x, y) | x <- [1 .. 5], y <- [1 .. 5], filterF (x, y) ]
 
 genTokens :: (Tokens -> Bool) -> [Tokens]
 genTokens filterF = nubBy
-  tokensEq
+  tokenssPartialEq
   [ ((x, y), (x', y'))
   | x  <- [1 .. 5]
   , y  <- [1 .. 5]
@@ -228,7 +228,7 @@ pickStartingLoc [p2Tokens] = Just
   [ p2Tokens
   , last $ sortOn
     (\x -> numberOfMoves (GameState 0 emptySpaces (x, p2Tokens)))
-    (genTokens (\x -> validTokens x && tokensUnique x p2Tokens))
+    (genTokens (\x -> validTokens x && tokenssUnique x p2Tokens))
   ]
 
 pickNextMove :: GameState -> Maybe GameState
