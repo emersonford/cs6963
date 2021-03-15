@@ -24,7 +24,7 @@ import Santorini (GameState
   , toC
   , buildC
   , validTokens
-  , tokenssUnique)
+  , tokensUnique)
 
 main :: IO ()
 main = hspec $ do
@@ -105,7 +105,7 @@ main = hspec $ do
                 , let yTokens   = (coordList !! 2, coordList !! 3)
                 , validTokens xTokens
                 , validTokens yTokens
-                , tokenssUnique xTokens yTokens
+                , tokensUnique xTokens yTokens
                 ]
         `using` parListChunk 2048 rdeepseq
         )
@@ -163,7 +163,7 @@ main = hspec $ do
                 , let yTokens   = (coordList !! 2, coordList !! 3)
                 , validTokens xTokens
                 , validTokens yTokens
-                , tokenssUnique xTokens yTokens
+                , tokensUnique xTokens yTokens
                 ]
         `using` parListChunk 2048 rdeepseq
         )
@@ -201,7 +201,7 @@ main = hspec $ do
                 , let yTokens   = (coordList !! 2, coordList !! 3)
                 , validTokens xTokens
                 , validTokens yTokens
-                , tokenssUnique xTokens yTokens
+                , tokensUnique xTokens yTokens
                 ]
         `using` parListChunk 2048 rdeepseq
         )
