@@ -56,10 +56,25 @@ mValidTokens [l] = if validTokens l then Just [l] else Nothing
 
 emptySpaces = V.fromList [ V.fromList [ 0 | _ <- [1 .. 5] ] | _ <- [1 .. 5] ]
 
+data Card = Apollo | Artemis | Atlas | Demeter | Hephastus | Minotaur | Pan | Prometheus
+  deriving (Generic, Show)
+
+instance ToJSON Card
+instance FromJSON Card
+
+data Player = Player
+  { card   :: Card
+  , tokens :: Tokens
+  }
+  deriving (Generic, Show)
+
+instance ToJSON Player
+instance FromJSON Player
+
 data GameState = GameState
   { turn    :: Int
   , spaces  :: Vector (Vector Int)
-  , players :: (Tokens, Tokens)
+  , players :: (Player, Player)
   }
   deriving (Generic, Show)
 
@@ -81,12 +96,14 @@ flipPlayers :: (Tokens, Tokens) -> (Tokens, Tokens)
 flipPlayers (f, s) = (s, f)
 
 validateGameState :: GameState -> Bool
-validateGameState (GameState t sp (p1, p2)) =
+validateGameState (GameState t sp (Player c1 tkns1, Player c2 tkns2)) =
     -- Ensure each player spaces is valid.
-  validTokens p1
-    && validTokens p2
+  validTokens tkns1
+    && validTokens tkns2
     -- Ensure each token coordinate is unique.
-    && tokensUnique p1 p2
+    && tokensUnique tkns1 tkns2
+    -- Ensure each player has a unique card.
+    && (c1 /= c2)
     -- Ensure there are 5 rows of spaces.
     && (length sp == 5)
     -- Ensure there are 5 columns per row of spaces.
