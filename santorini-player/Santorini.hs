@@ -1,27 +1,35 @@
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 
 module Santorini
   ( GameState,
     Tokens,
+    Card (..),
+    PrePlayer (PrePlayer),
+    Player (Player),
     mValidGameState,
-    mValidTokens,
     validTokens,
     tokensUnique,
     occupied,
     canBuild,
     canMove,
     pickNextMove,
+    pickStartingLocFirst,
+    pickStartingLocSecond,
   )
 where
 
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson (FromJSON, ToJSON, defaultOptions, genericParseJSON, parseJSON, rejectUnknownFields)
+import Data.Bifunctor (first)
 import Data.Int (Int8)
-import Data.List (nubBy, sortOn)
+import Data.List (maximumBy, nubBy, sortOn)
 import Data.Tuple (swap)
 import Data.Vector (Vector, (!), (//))
 import qualified Data.Vector as V (empty, fromList, toList, uniq, (++))
 import Debug.Trace (trace)
 import GHC.Generics
+
+aesonCustomOptions = defaultOptions {rejectUnknownFields = True}
 
 {- Data Structures & Validation -}
 type Coord = (Int8, Int8)
@@ -51,9 +59,6 @@ validTokens (c1, c2) =
     -- Ensure coordinates are unique.
     && (c1 /= c2)
 
-mValidTokens [] = Just []
-mValidTokens [l] = if validTokens l then Just [l] else Nothing
-
 data Card = Apollo | Artemis | Atlas | Demeter | Hephastus | Minotaur | Pan | Prometheus
   deriving (Generic, Show, Eq)
 
@@ -69,7 +74,15 @@ data Player = Player
 
 instance ToJSON Player
 
-instance FromJSON Player
+instance FromJSON Player where
+  parseJSON = genericParseJSON aesonCustomOptions
+
+newtype PrePlayer = PrePlayer {card :: Card} deriving (Generic, Show)
+
+instance ToJSON PrePlayer
+
+instance FromJSON PrePlayer where
+  parseJSON = genericParseJSON aesonCustomOptions
 
 data GameState = GameState
   { turn :: Integer,
@@ -80,7 +93,8 @@ data GameState = GameState
 
 instance ToJSON GameState
 
-instance FromJSON GameState
+instance FromJSON GameState where
+  parseJSON = genericParseJSON aesonCustomOptions
 
 emptySpaces = V.fromList [V.fromList [0 | _ <- [1 .. 5]] | _ <- [1 .. 5]]
 
@@ -120,7 +134,7 @@ mValidGameState gs = if validateGameState gs then Just gs else Nothing
 
 {- Game State Functions -}
 genCoords :: (Coord -> Bool) -> [Coord]
-genCoords filterF = [(x, y) | x <- [1 .. 5], y <- [1 .. 5], filterF (x, y)]
+genCoords filterF = filter filterF [(x, y) | x <- [1 .. 5], y <- [1 .. 5]]
 
 genTokens :: (Tokens -> Bool) -> [Tokens]
 genTokens filterF =
@@ -315,7 +329,7 @@ getPossibleGameStates' Prometheus gs fromC otherC =
 
           -- Generate a list of moves restricted to the level we're currently at.
           let level = spaceIdx sp fromC
-          toC <- genCoords (\x -> canMove fromC x gs && spaceIdx sp x <= level)
+          toC <- genCoords (\x -> canMove fromC x gs && spaceIdx (spaces gsBuild1) x <= level)
           let gsMove = gsBuild1 {players = (p1 {tokens = (toC, otherC)}, p2)}
 
           -- Generate a list of second builds if we didn't win on our move.
@@ -333,7 +347,9 @@ getPossibleGameStates' Prometheus gs fromC otherC =
            )
 
 getPossibleGameStates :: GameState -> [(GameState, Bool)]
-getPossibleGameStates gs = let (GameState _ _ (Player c (fstT, sndT), p2)) = gs in [(fstT, sndT), (sndT, fstT)] >>= uncurry (getPossibleGameStates' c gs)
+getPossibleGameStates gs =
+  let (GameState _ _ (Player c (fstT, sndT), p2)) = gs
+   in [(fstT, sndT), (sndT, fstT)] >>= uncurry (getPossibleGameStates' c gs)
 
 incrementTurn (GameState t sp pls) = GameState (t + 1) sp (swap pls)
 
@@ -341,41 +357,108 @@ incrementTurn (GameState t sp pls) = GameState (t + 1) sp (swap pls)
 sumTokenHeight (GameState _ sp (p1, _)) =
   let (fstT, sndT) = tokens p1 in spaceIdx sp fstT + spaceIdx sp sndT
 
-scoreGameState :: (GameState, Bool) -> Double
-scoreGameState (gs, gsWon)
-  | gsWon = 2
-  | otherwise =
-    let numMoves = length $ getPossibleGameStates gs
-        numMovesNorm = fromIntegral numMoves / 91
-        tokH = sumTokenHeight gs
-        tokHNorm = fromIntegral tokH / 4
-        score = (0.5 * numMovesNorm) + (0.5 * tokHNorm)
-     in trace
-          ( "numMoves: "
-              ++ show numMoves
-              ++ "\tnorm: "
-              ++ show numMovesNorm
-              ++ "\ttokH: "
-              ++ show tokH
-              ++ "\ttokHNorm: "
-              ++ show tokHNorm
-              ++ "\tscore: "
-              ++ show score
-          )
-          score
+-- Maximum number of moves if the board is completely empty used for normalization.
+-- Pregenerate them to save time.
+maxMoves :: Card -> Int
+maxMoves Apollo = 104
+maxMoves Artemis = 624
+maxMoves Atlas = 208
+maxMoves Demeter = 700
+maxMoves Hephastus = 208
+maxMoves Minotaur = 104
+maxMoves Pan = 104
+maxMoves Prometheus = 936
 
--- {- Selection Functions -}
--- pickStartingLoc :: [Tokens] -> Maybe [Tokens]
--- pickStartingLoc [] = Just [((2, 2), (4, 3))]
--- pickStartingLoc [p2Tokens] =
---   Just
---     [ p2Tokens,
---       last $
---         sortOn
---           (\x -> numberOfMoves (GameState 0 emptySpaces (x, p2Tokens)))
---           (genTokens (\x -> validTokens x && tokensUnique x p2Tokens))
---     ]
+-- maxMoves c = maximum [length $ getPossibleGameStates (GameState 0 emptySpaces (Player c t, Player Apollo ((0, 0), (0, 0)))) | t <- genTokens validTokens]
 
-pickNextMove :: GameState -> Maybe GameState
-pickNextMove gs =
-  Just (fst $ last $ sortOn scoreGameState (getPossibleGameStates gs))
+intDiv :: Int -> Int -> Double
+intDiv a b = fromIntegral a / fromIntegral b
+
+scoreGameState :: GameState -> Double
+scoreGameState gs =
+  let (GameState _ _ (Player c1 t1, Player c2 t2)) = gs
+      numMovesThisP = length (getPossibleGameStates gs)
+      tokHThisP = sumTokenHeight gs
+
+      rGs = gs {players = (Player c2 t2, Player c1 t1)}
+      numMovesOtherP = length (getPossibleGameStates rGs)
+      tokHOtherP = sumTokenHeight rGs
+
+      numMoveRatioDiff = (numMovesThisP `intDiv` maxMoves c1) - (numMovesOtherP `intDiv` maxMoves c2)
+      numMoveDiff = fromIntegral (numMovesThisP - numMovesOtherP)
+      tokHDiff = fromIntegral (tokHThisP - tokHOtherP)
+
+      score
+        | numMovesThisP + numMovesOtherP > 100 = (0.25 * numMoveRatioDiff) + (0.75 * tokHDiff)
+        | otherwise = (0.4 * numMoveDiff) + (0.6 * tokHDiff)
+   in --  trace
+      --    ( "numMoveDiff: "
+      --        ++ show numMoveDiff
+      --        ++ "\tnumMoveRatioDiff: "
+      --        ++ show numMoveRatioDiff
+      --        ++ "\ttokHDiff: "
+      --        ++ show tokHDiff
+      --        ++ "\tscore: "
+      --        ++ show score
+      --    )
+      score
+
+{- Selection Functions -}
+maxBy f l = last (sortOn f l)
+
+pickStartingLocFirst :: Card -> Player
+pickStartingLocFirst c =
+  let possibleGameStates = [GameState 0 emptySpaces (Player c t, Player Apollo ((0, 0), (0, 0))) | t <- genTokens validTokens]
+      possibleGsAndBranch = [(pgs, getPossibleGameStates pgs) | pgs <- possibleGameStates]
+      (GameState _ _ (gsp1, _)) = fst $ maxBy (\(_, pgsBranch) -> length pgsBranch) possibleGsAndBranch
+   in gsp1
+
+pslsBranchFactor = 1
+
+pickStartingLocSecond :: (PrePlayer, Player) -> Player
+pickStartingLocSecond (PrePlayer c, p2) =
+  let possibleGameStates = [(GameState 0 emptySpaces (Player c t, p2), False) | t <- genTokens (\x -> validTokens x && tokensUnique x (tokens p2))]
+      (GameState _ _ (p1, _)) = minimax' pslsBranchFactor possibleGameStates
+   in p1
+
+pnmBranchFactor = 3
+
+pickNextMove :: GameState -> GameState
+pickNextMove gs = incrementTurn $ minimax' pnmBranchFactor (getPossibleGameStates gs)
+
+maxFoldWithLim lim f currMax [] = currMax
+maxFoldWithLim lim f currMax (x : xs) =
+  let newMax = max currMax (f currMax x)
+   in if newMax >= lim then lim else maxFoldWithLim lim f newMax xs
+
+minFoldWithLim lim f currMin [] = currMin
+minFoldWithLim lim f currMin (x : xs) =
+  let newMin = min currMin (f currMin x)
+   in if newMin <= lim then lim else minFoldWithLim lim f newMin xs
+
+-- depth (gs, gsWon) isMax
+minimax :: Int -> (GameState, Bool) -> Bool -> Double -> Double -> Double
+-- If the GameState we received is a won board, return Infinity.
+minimax _ (gs, True) isMax _ _ = (if isMax then 1 else -1) * (1 / 0)
+minimax 0 (gs, _) isMax _ _ = (if isMax then 1 else -1) * scoreGameState gs
+minimax depth (gs, _) True minVal maxVal = maxFoldWithLim maxVal (\currMax x -> minimax (depth - 1) x False currMax maxVal) minVal (map (first incrementTurn) (getPossibleGameStates gs))
+minimax depth (gs, _) False minVal maxVal = minFoldWithLim minVal (\currMin x -> minimax (depth - 1) x True minVal currMin) maxVal (map (first incrementTurn) (getPossibleGameStates gs))
+
+minimaxSearchLimit = 5000000
+
+minimax'Fold depth (currGs, currMin) [gs] =
+  let score = minimax depth gs True currMin (1 / 0)
+   in if score > currMin then (fst gs, score) else (currGs, currMin)
+minimax'Fold depth (currGs, currMin) (gs : gss)
+  | score == (1 / 0) = (fst gs, score)
+  | score > currMin = minimax'Fold depth (fst gs, score) gss
+  | otherwise = minimax'Fold depth (currGs, currMin) gss
+  where
+    score = minimax depth gs True currMin (1 / 0)
+
+minimax' :: Int -> [(GameState, Bool)] -> GameState
+minimax' depth possibleGameStates =
+  let -- d = if length possibleGameStates ^ depth <= minimaxSearchLimit then depth - 1 else 0
+      d = depth - 1
+      fstGs = head possibleGameStates
+   in fst $ minimax'Fold d (fst fstGs, minimax d fstGs True (-1 / 0) (1 / 0)) (tail possibleGameStates)
