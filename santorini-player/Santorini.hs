@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE NumericUnderscores #-}
 
 module Santorini
   ( GameState,
@@ -21,11 +22,9 @@ where
 
 import Data.Aeson (FromJSON, ToJSON, defaultOptions, genericParseJSON, parseJSON, rejectUnknownFields)
 import Data.Bifunctor (first)
-import Data.Int (Int8)
+import Data.Int (Int32, Int8)
 import Data.List (maximumBy, nubBy, sortOn)
 import Data.Tuple (swap)
-import Data.Vector (Vector, (!), (//))
-import qualified Data.Vector as V (empty, fromList, toList, uniq, (++))
 import Debug.Trace (trace)
 import GHC.Generics
 
@@ -36,14 +35,20 @@ type Coord = (Int8, Int8)
 
 type Tokens = (Coord, Coord)
 
+type Row = (Int8, Int8, Int8, Int8, Int8)
+
+type Spaces = (Row, Row, Row, Row, Row)
+
 validCoord :: Coord -> Bool
 validCoord (x, y) = 1 <= min x y && max x y <= 5
 
 inTokens :: Coord -> Tokens -> Bool
 inTokens c (x, x') = c == x || c == x'
+{-# INLINE inTokens #-}
 
 occupied :: Coord -> (Tokens, Tokens) -> Bool
 occupied c (tokens1, tokens2) = inTokens c tokens1 || inTokens c tokens2
+{-# INLINE occupied #-}
 
 tokensPartialEq :: Tokens -> Tokens -> Bool
 tokensPartialEq (x, x') (y, y') = (x == y && x' == y') || (x == y' && x' == y)
@@ -86,7 +91,7 @@ instance FromJSON PrePlayer where
 
 data GameState = GameState
   { turn :: Integer,
-    spaces :: Vector (Vector Int8),
+    spaces :: Spaces,
     players :: (Player, Player)
   }
   deriving (Generic, Show)
@@ -96,21 +101,43 @@ instance ToJSON GameState
 instance FromJSON GameState where
   parseJSON = genericParseJSON aesonCustomOptions
 
-emptySpaces = V.fromList [V.fromList [0 | _ <- [1 .. 5]] | _ <- [1 .. 5]]
+emptySpaces = ((0, 0, 0, 0, 0), (0, 0, 0, 0, 0), (0, 0, 0, 0, 0), (0, 0, 0, 0, 0), (0, 0, 0, 0, 0))
 
 getTokenPair :: GameState -> (Tokens, Tokens)
 getTokenPair (GameState _ _ (Player _ p1, Player _ p2)) = (p1, p2)
 
-spaceIdx :: Vector (Vector Int8) -> Coord -> Int8
-spaceIdx sp (coordX, coordY) = sp ! fromIntegral (coordX - 1) ! fromIntegral (coordY - 1)
+spaceIdx :: Spaces -> Coord -> Int8
+spaceIdx (rone, rtwo, rthree, rfour, rfive) (row, col) = case ( case row of
+                                                                  1 -> rone
+                                                                  2 -> rtwo
+                                                                  3 -> rthree
+                                                                  4 -> rfour
+                                                                  5 -> rfive
+                                                              ) of
+  (cone, ctwo, cthree, cfour, cfive) -> case col of
+    1 -> cone
+    2 -> ctwo
+    3 -> cthree
+    4 -> cfour
+    5 -> cfive
 
-mapToSpace ::
-  (Int8 -> Int8) -> Vector (Vector Int8) -> Coord -> Vector (Vector Int8)
-mapToSpace f sp (fstC, sndC) =
-  let newVal = f $ spaceIdx sp (fstC, sndC)
-      row = fromIntegral (fstC - 1)
-      col = fromIntegral (sndC - 1)
-   in sp // [(row, sp ! row // [(col, newVal)])]
+updateRow :: (Int8 -> Int8) -> Row -> Int8 -> Row
+updateRow f r idx = case r of
+  (one, two, three, four, five) -> case idx of
+    1 -> (f one, two, three, four, five)
+    2 -> (one, f two, three, four, five)
+    3 -> (one, two, f three, four, five)
+    4 -> (one, two, three, f four, five)
+    5 -> (one, two, three, four, f five)
+
+mapToSpace :: (Int8 -> Int8) -> Spaces -> Coord -> Spaces
+mapToSpace f sp (row, col) = case sp of
+  (one, two, three, four, five) -> case row of
+    1 -> (updateRow f one col, two, three, four, five)
+    2 -> (one, updateRow f two col, three, four, five)
+    3 -> (one, two, updateRow f three col, four, five)
+    4 -> (one, two, three, updateRow f four col, five)
+    5 -> (one, two, three, four, updateRow f five col)
 
 validateGameState :: GameState -> Bool
 validateGameState (GameState t sp (Player c1 tkns1, Player c2 tkns2)) =
@@ -121,12 +148,8 @@ validateGameState (GameState t sp (Player c1 tkns1, Player c2 tkns2)) =
     && tokensUnique tkns1 tkns2
     -- Ensure each player has a unique card.
     && (c1 /= c2)
-    -- Ensure there are 5 rows of spaces.
-    && (length sp == 5)
-    -- Ensure there are 5 columns per row of spaces.
-    && all ((5 ==) . length) sp
     -- Ensure each board slot value is in bounds.
-    && (all $ all (\x -> 0 <= x && x <= 4)) sp
+    && all (\x -> 0 <= x && x <= 4) [spaceIdx sp (row, col) | row <- [1 .. 5], col <- [1 .. 5]]
     -- Ensure turns is a valid number.
     && (t >= 0)
 
@@ -136,14 +159,46 @@ mValidGameState gs = if validateGameState gs then Just gs else Nothing
 genCoords :: (Coord -> Bool) -> [Coord]
 genCoords filterF = filter filterF [(x, y) | x <- [1 .. 5], y <- [1 .. 5]]
 
+-- Pregenerate coordsAround coordinates.
 genCoordsAround :: Coord -> (Coord -> Bool) -> [Coord]
-genCoordsAround (cx, cy) filterF =
-  [ (x, y)
-    | x <- [(max 1 (cx - 1)) .. (min 5 (cx + 1))],
-      y <- [(max 1 (cy - 1)) .. (min 5 (cy + 1))],
-      (x, y) /= (cx, cy),
-      filterF (x, y)
-  ]
+genCoordsAround c f =
+  filter
+    f
+    ( case c of
+        (1, 1) -> [(1, 2), (2, 1), (2, 2)]
+        (1, 2) -> [(1, 1), (1, 3), (2, 1), (2, 2), (2, 3)]
+        (1, 3) -> [(1, 2), (1, 4), (2, 2), (2, 3), (2, 4)]
+        (1, 4) -> [(1, 3), (1, 5), (2, 3), (2, 4), (2, 5)]
+        (1, 5) -> [(1, 4), (2, 4), (2, 5)]
+        (2, 1) -> [(1, 1), (1, 2), (2, 2), (3, 1), (3, 2)]
+        (2, 2) -> [(1, 1), (1, 2), (1, 3), (2, 1), (2, 3), (3, 1), (3, 2), (3, 3)]
+        (2, 3) -> [(1, 2), (1, 3), (1, 4), (2, 2), (2, 4), (3, 2), (3, 3), (3, 4)]
+        (2, 4) -> [(1, 3), (1, 4), (1, 5), (2, 3), (2, 5), (3, 3), (3, 4), (3, 5)]
+        (2, 5) -> [(1, 4), (1, 5), (2, 4), (3, 4), (3, 5)]
+        (3, 1) -> [(2, 1), (2, 2), (3, 2), (4, 1), (4, 2)]
+        (3, 2) -> [(2, 1), (2, 2), (2, 3), (3, 1), (3, 3), (4, 1), (4, 2), (4, 3)]
+        (3, 3) -> [(2, 2), (2, 3), (2, 4), (3, 2), (3, 4), (4, 2), (4, 3), (4, 4)]
+        (3, 4) -> [(2, 3), (2, 4), (2, 5), (3, 3), (3, 5), (4, 3), (4, 4), (4, 5)]
+        (3, 5) -> [(2, 4), (2, 5), (3, 4), (4, 4), (4, 5)]
+        (4, 1) -> [(3, 1), (3, 2), (4, 2), (5, 1), (5, 2)]
+        (4, 2) -> [(3, 1), (3, 2), (3, 3), (4, 1), (4, 3), (5, 1), (5, 2), (5, 3)]
+        (4, 3) -> [(3, 2), (3, 3), (3, 4), (4, 2), (4, 4), (5, 2), (5, 3), (5, 4)]
+        (4, 4) -> [(3, 3), (3, 4), (3, 5), (4, 3), (4, 5), (5, 3), (5, 4), (5, 5)]
+        (4, 5) -> [(3, 4), (3, 5), (4, 4), (5, 4), (5, 5)]
+        (5, 1) -> [(4, 1), (4, 2), (5, 2)]
+        (5, 2) -> [(4, 1), (4, 2), (4, 3), (5, 1), (5, 3)]
+        (5, 3) -> [(4, 2), (4, 3), (4, 4), (5, 2), (5, 4)]
+        (5, 4) -> [(4, 3), (4, 4), (4, 5), (5, 3), (5, 5)]
+        (5, 5) -> [(4, 4), (4, 5), (5, 4)]
+    )
+
+-- genCoordsAround (cx, cy) filterF =
+--   [ (x, y)
+--     | x <- [(max 1 (cx - 1)) .. (min 5 (cx + 1))],
+--       y <- [(max 1 (cy - 1)) .. (min 5 (cy + 1))],
+--       (x, y) /= (cx, cy),
+--       filterF (x, y)
+--   ]
 
 genTokens :: (Tokens -> Bool) -> [Tokens]
 genTokens filterF =
@@ -158,15 +213,16 @@ genTokens filterF =
     ]
 
 canBuild' :: Coord -> Coord -> GameState -> Bool -> Bool
-canBuild' (fromX, fromY) (toX, toY) gs checkOccupied =
-  let (GameState _ sp pl) = gs
-   in (spaceIdx sp (toX, toY) < 4)
-        && ( not checkOccupied
-               || not (occupied (toX, toY) (getTokenPair gs))
-           )
+canBuild' (fromX, fromY) (toX, toY) (GameState t sp pl) checkOccupied =
+  (spaceIdx sp (toX, toY) < 4)
+    && ( not checkOccupied
+           || not (occupied (toX, toY) (getTokenPair (GameState t sp pl)))
+       )
+{-# INLINE canBuild' #-}
 
 canBuild :: Coord -> Coord -> GameState -> Bool
 canBuild fromC toC gs = canBuild' fromC toC gs True
+{-# INLINE canBuild #-}
 
 canMove' :: Coord -> Coord -> GameState -> Bool -> Bool
 canMove' (fromX, fromY) (toX, toY) gs checkOccupied =
@@ -174,9 +230,11 @@ canMove' (fromX, fromY) (toX, toY) gs checkOccupied =
       fromLevel = spaceIdx sp (fromX, fromY)
       toLevel = spaceIdx sp (toX, toY)
    in fromLevel >= toLevel - 1 && canBuild' (fromX, fromY) (toX, toY) gs checkOccupied
+{-# INLINE canMove' #-}
 
 canMove :: Coord -> Coord -> GameState -> Bool
 canMove fromC toC gs = canMove' fromC toC gs True
+{-# INLINE canMove #-}
 
 -- Return the GameState as is if the first player's first token is in a space
 -- with height 3. Else, apply the function to the GameState.
@@ -184,12 +242,15 @@ wonOrElse :: GameState -> [(GameState, Bool)] -> [(GameState, Bool)]
 wonOrElse gs els =
   let (GameState _ sp (Player _ (fstT, _), _)) = gs
    in if spaceIdx sp fstT == 3 then [(gs, True)] else els
+{-# INLINE wonOrElse #-}
 
 getBuildMoves' :: Coord -> GameState -> (Int8 -> Int8) -> [(GameState, Bool)]
 getBuildMoves' fromC gs buildF = genCoordsAround fromC (\x -> canBuild fromC x gs) >>= (\x -> [(gs {spaces = mapToSpace buildF (spaces gs) x}, False)])
+{-# INLINE getBuildMoves' #-}
 
 getBuildMoves :: Coord -> GameState -> [(GameState, Bool)]
 getBuildMoves fromC gs = getBuildMoves' fromC gs (+ 1)
+{-# INLINE getBuildMoves #-}
 
 getMoves :: Coord -> Coord -> GameState -> [(Coord, GameState)]
 getMoves fromC otherC gs =
@@ -198,6 +259,7 @@ getMoves fromC otherC gs =
         | toC <- genCoordsAround fromC (\x -> canMove fromC x gs),
           let gsMove = gs {players = (p1 {tokens = (toC, otherC)}, p2)}
       ]
+{-# INLINE getMoves #-}
 
 pushBackToken (fromX, fromY) (toX, toY) = (toX + (toX - fromX), toY + (toY - fromY))
 
@@ -230,7 +292,7 @@ getPossibleGameStates' Artemis gs fromC otherC =
           ( getBuildMoves toC gsMove1
               -- Generate a list of optional second moves.
               ++ ( do
-                     toC2 <- genCoordsAround fromC (\x -> canMove toC x gsMove1 && (x /= fromC))
+                     toC2 <- genCoordsAround toC (\x -> canMove toC x gsMove1 && (x /= fromC))
                      let gsMove2 = gsMove1 {players = (p1 {tokens = (toC2, otherC)}, p2)}
 
                      wonOrElse
@@ -260,13 +322,13 @@ getPossibleGameStates' Demeter gs fromC otherC =
       gsMove
       -- Generate a list of builds after the first move.
       ( do
-          firstBuildC <- genCoordsAround fromC (\x -> canBuild toC x gsMove)
+          firstBuildC <- genCoordsAround toC (\x -> canBuild toC x gsMove)
           let gsBuild1 = gsMove {spaces = mapToSpace (+ 1) (spaces gsMove) firstBuildC}
 
           -- Generate a list of optional second builds after the first build.
           (gsBuild1, False) :
             [ (gsBuild1 {spaces = mapToSpace (+ 1) (spaces gsBuild1) secondBuildC}, False)
-              | secondBuildC <- genCoordsAround fromC (\x -> canBuild toC x gsBuild1 && x /= firstBuildC)
+              | secondBuildC <- genCoordsAround toC (\x -> canBuild toC x gsBuild1 && x /= firstBuildC)
             ]
       )
 getPossibleGameStates' Hephastus gs fromC otherC =
@@ -278,7 +340,7 @@ getPossibleGameStates' Hephastus gs fromC otherC =
       gsMove
       -- Generate a list of builds after the first move.
       ( do
-          firstBuildC <- genCoordsAround fromC (\x -> canBuild toC x gsMove)
+          firstBuildC <- genCoordsAround toC (\x -> canBuild toC x gsMove)
           let gsBuild1 = gsMove {spaces = mapToSpace (+ 1) (spaces gsMove) firstBuildC}
 
           -- If the space we just built on is less than 3, add an additonal
@@ -379,30 +441,30 @@ intDiv a b = fromIntegral a / fromIntegral b
 scoreGameState :: GameState -> Double
 scoreGameState gs =
   let (GameState _ _ (Player c1 t1, Player c2 t2)) = gs
-      numMovesThisP = length (getPossibleGameStates gs)
-      tokHThisP = sumTokenHeight gs
+      movesThisP = [fst mtup | mtup <- uncurry getMoves t1 gs ++ uncurry getMoves (swap t1) gs]
+      spacesArndThisP = [spaceIdx (spaces gs) c | c <- movesThisP]
+      numMovesThisP = length movesThisP `intDiv` 16
+      tokHThisP = fromIntegral (sumTokenHeight gs) `intDiv` 9
 
       rGs = gs {players = (Player c2 t2, Player c1 t1)}
-      numMovesOtherP = length (getPossibleGameStates rGs)
-      tokHOtherP = sumTokenHeight rGs
-
-      numMoveRatioDiff = (numMovesThisP `intDiv` maxMoves c1) - (numMovesOtherP `intDiv` maxMoves c2)
-      numMoveDiff = fromIntegral (numMovesThisP - numMovesOtherP)
-      tokHDiff = fromIntegral (tokHThisP - tokHOtherP)
+      movesOtherP = [fst mtup | mtup <- uncurry getMoves t2 rGs ++ uncurry getMoves (swap t2) rGs]
+      spacesArndOtherP = [spaceIdx (spaces gs) c | c <- movesOtherP]
+      numMovesOtherP = length movesOtherP `intDiv` 16
+      tokHOtherP = fromIntegral (sumTokenHeight rGs) `intDiv` 9
 
       score
-        | numMovesThisP + numMovesOtherP > 100 = (0.25 * numMoveRatioDiff) + (0.75 * tokHDiff)
-        | otherwise = (0.4 * numMoveDiff) + (0.6 * tokHDiff)
-   in --  trace
-      --    ( "numMoveDiff: "
-      --        ++ show numMoveDiff
-      --        ++ "\tnumMoveRatioDiff: "
-      --        ++ show numMoveRatioDiff
-      --        ++ "\ttokHDiff: "
-      --        ++ show tokHDiff
-      --        ++ "\tscore: "
-      --        ++ show score
-      --    )
+        | elem 3 spacesArndThisP = (1 / 0)
+        | otherwise = 0.55 * (tokHThisP - tokHOtherP) + 0.45 * (numMovesThisP - numMovesOtherP)
+   in -- trace
+      --   ( "numMovesThisP: "
+      --       ++ show numMovesThisP
+      --       ++ "\tnumMovesOtherP: "
+      --       ++ show numMovesOtherP
+      --       ++ "\ttokHDiff: "
+      --       ++ show tokHDiff
+      --       ++ "\tscore: "
+      --       ++ show score
+      --   )
       score
 
 {- Selection Functions -}
@@ -410,57 +472,74 @@ maxBy f l = last (sortOn f l)
 
 pickStartingLocFirst :: Card -> Player
 pickStartingLocFirst c =
-  let possibleGameStates = [GameState 0 emptySpaces (Player c t, Player Apollo ((0, 0), (0, 0))) | t <- genTokens validTokens]
-      possibleGsAndBranch = [(pgs, getPossibleGameStates pgs) | pgs <- possibleGameStates]
-      (GameState _ _ (gsp1, _)) = fst $ maxBy (\(_, pgsBranch) -> length pgsBranch) possibleGsAndBranch
-   in gsp1
-
-pslsBranchFactor = 1
+  let possiblePlayers =
+        [ ( Player c t,
+            minimum [length (getPossibleGameStates (GameState 0 emptySpaces (Player c t, Player Apollo t2))) | t2 <- genTokens (\x -> validTokens x && tokensUnique x t)]
+          )
+          | t <- genTokens validTokens
+        ]
+   in fst $ maxBy snd possiblePlayers
 
 pickStartingLocSecond :: (PrePlayer, Player) -> Player
 pickStartingLocSecond (PrePlayer c, p2) =
   let possibleGameStates = [(GameState 0 emptySpaces (Player c t, p2), False) | t <- genTokens (\x -> validTokens x && tokensUnique x (tokens p2))]
-      (GameState _ _ (p1, _)) = minimax' pslsBranchFactor possibleGameStates
+      (GameState _ _ (p1, _)) = minimax' possibleGameStates
    in p1
 
-pnmBranchFactor = 3
+-- getBranchDepth currD numMoves =
+--   let newD
+--         | numMoves > 200 = currD - 2
+--         | numMoves < 10 = currD + 1
+--         | otherwise = currD - 1
+--    in max 0 newD
+-- getMoveAlloc currMoveAlloc numMoves = currMoveAlloc `div` numMoves
+-- {-# INLINE getMoveAlloc #-}
 
 pickNextMove :: GameState -> GameState
-pickNextMove gs = incrementTurn $ minimax' pnmBranchFactor (getPossibleGameStates gs)
+pickNextMove gs =
+  case gs of
+    (GameState _ _ (Player c1 _, Player c2 _)) ->
+      let pgs = getPossibleGameStates gs
+       in -- trace
+          --   ("num moves: " ++ show (length pgs))
+          (incrementTurn $ minimax' pgs)
 
 maxFoldWithLim lim f currMax [] = currMax
 maxFoldWithLim lim f currMax (x : xs) =
-  let newMax = max currMax (f currMax x)
-   in if newMax >= lim then lim else maxFoldWithLim lim f newMax xs
+  let score = f currMax x
+   in if score >= lim then lim else maxFoldWithLim lim f (max score currMax) xs
 
-minFoldWithLim lim f currMin [] = currMin
-minFoldWithLim lim f currMin (x : xs) =
-  let newMin = min currMin (f currMin x)
-   in if newMin <= lim then lim else minFoldWithLim lim f newMin xs
-
--- depth (gs, gsWon) isMax
+-- moveAlloc (gs, gsWon) isMax
 minimax :: Int -> (GameState, Bool) -> Bool -> Double -> Double -> Double
 -- If the GameState we received is a won board, return Infinity.
-minimax _ (gs, True) isMax _ _ = (if isMax then 1 else -1) * (1 / 0)
+minimax _ (gs, True) isMax _ _ = (if isMax then -1 else 1) * (1 / 0)
 minimax 0 (gs, _) isMax _ _ = (if isMax then 1 else -1) * scoreGameState gs
-minimax depth (gs, _) True minVal maxVal = maxFoldWithLim maxVal (\currMax x -> minimax (depth - 1) x False currMax maxVal) minVal (map (first incrementTurn) (getPossibleGameStates gs))
-minimax depth (gs, _) False minVal maxVal = minFoldWithLim minVal (\currMin x -> minimax (depth - 1) x True minVal currMin) maxVal (map (first incrementTurn) (getPossibleGameStates gs))
+minimax depth (gs, _) isMax alpha beta =
+  let pgs = (if depth > 1 then sortOn (scoreGameState . incrementTurn . fst) else id) (getPossibleGameStates gs)
+   in maxFoldWithLim
+        beta
+        (\currAlpha x -> -1 * minimax (depth - 1) (first incrementTurn x) (not isMax) (-1 * beta) (-1 * currAlpha))
+        alpha
+        pgs
 
-minimaxSearchLimit = 5000000
-
-minimax'Fold depth (currGs, currMin) [gs] =
-  let score = minimax depth gs True currMin (1 / 0)
-   in if score > currMin then (fst gs, score) else (currGs, currMin)
-minimax'Fold depth (currGs, currMin) (gs : gss)
-  | score == (1 / 0) = (fst gs, score)
-  | score > currMin = minimax'Fold depth (fst gs, score) gss
-  | otherwise = minimax'Fold depth (currGs, currMin) gss
+minimax'Fold depth (currGs, currAlpha) [] = (currGs, currAlpha)
+minimax'Fold depth (currGs, currAlpha) (gs : gss)
+  | currAlpha == (1 / 0) = (currGs, currAlpha)
+  | score > currAlpha = minimax'Fold depth (fst gs, score) gss
+  | otherwise = minimax'Fold depth (currGs, currAlpha) gss
   where
-    score = minimax depth gs True currMin (1 / 0)
+    score = -1 * minimax depth (first incrementTurn gs) False (-1 / 0) (-1 * currAlpha)
 
-minimax' :: Int -> [(GameState, Bool)] -> GameState
-minimax' depth possibleGameStates =
-  let -- d = if length possibleGameStates ^ depth <= minimaxSearchLimit then depth - 1 else 0
-      d = depth - 1
-      fstGs = head possibleGameStates
-   in fst $ minimax'Fold d (fst fstGs, minimax d fstGs True (-1 / 0) (1 / 0)) (tail possibleGameStates)
+minimax' :: [(GameState, Bool)] -> GameState
+minimax' possibleGameStates =
+  let d = 3
+      winningMove = foldr1 (\elem (gs, won) -> if won then (gs, won) else elem) possibleGameStates
+      pgs = sortOn (scoreGameState . incrementTurn . fst) possibleGameStates
+      fstGs = head pgs
+      m =
+        if snd winningMove
+          then (fst winningMove, 1 / 0)
+          else minimax'Fold d (fst fstGs, -1 * minimax d (first incrementTurn fstGs) False (-1 / 0) (1 / 0)) (tail pgs)
+   in trace
+        ("move score: " ++ show (snd m))
+        (fst m)
